@@ -1,0 +1,18 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: ankane/pgvector
+    container_name: pg-vector-db
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 123456
+      POSTGRES_DB: mydb
+    ports:
+      - "5418:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:

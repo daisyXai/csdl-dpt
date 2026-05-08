@@ -1,0 +1,17 @@
+pandas
+numpy
+awscli
+fastapi 
+uvicorn
+python-multipart
+urllib3
+
+tqdm
+
+opencv-python
+
+mtcnn
+tensorflow
+
+psycopg2-binary
+mediapipe
