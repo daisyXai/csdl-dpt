@@ -137,31 +137,141 @@ def resize_with_padding(image_bgr: np.ndarray, size: int = 128) -> np.ndarray:
     return canvas
 
 
+def safe_patch(
+    gray: np.ndarray,
+    center: np.ndarray | Tuple[float, float],
+    patch_w: float,
+    patch_h: float,
+) -> np.ndarray:
+    h, w = gray.shape[:2]
+    pw = max(1, int(round(patch_w)))
+    ph = max(1, int(round(patch_h)))
+    cx, cy = float(center[0]), float(center[1])
+
+    x1 = int(round(cx - pw / 2.0))
+    y1 = int(round(cy - ph / 2.0))
+    x2 = x1 + pw
+    y2 = y1 + ph
+
+    src_x1 = max(0, x1)
+    src_y1 = max(0, y1)
+    src_x2 = min(w, x2)
+    src_y2 = min(h, y2)
+
+    patch = np.zeros((ph, pw), dtype=gray.dtype)
+    if src_x2 <= src_x1 or src_y2 <= src_y1:
+        return patch
+
+    dst_x1 = src_x1 - x1
+    dst_y1 = src_y1 - y1
+    patch[
+        dst_y1 : dst_y1 + (src_y2 - src_y1),
+        dst_x1 : dst_x1 + (src_x2 - src_x1),
+    ] = gray[src_y1:src_y2, src_x1:src_x2]
+    return patch
+
+
+def patch_entropy(patch: np.ndarray) -> float:
+    if patch.size == 0:
+        return 0.0
+    hist = cv2.calcHist([patch.astype(np.uint8)], [0], None, [256], [0, 256]).ravel()
+    total = float(hist.sum())
+    if total <= 0.0:
+        return 0.0
+    p = hist[hist > 0.0] / total
+    entropy = -float(np.sum(p * np.log2(p)))
+    return clamp01(entropy / 8.0)
+
+
+def edge_density(patch: np.ndarray) -> float:
+    if patch.size == 0:
+        return 0.0
+    edges = cv2.Canny(patch.astype(np.uint8), 50, 150)
+    return clamp01(float(np.mean(edges > 0)))
+
+
+def gradient_mean(patch: np.ndarray) -> float:
+    if patch.size == 0:
+        return 0.0
+    patch_f = patch.astype(np.float32)
+    sobel_x = cv2.Sobel(patch_f, cv2.CV_32F, 1, 0, ksize=3)
+    sobel_y = cv2.Sobel(patch_f, cv2.CV_32F, 0, 1, ksize=3)
+    mag = cv2.magnitude(sobel_x, sobel_y)
+    return clamp01(float(np.mean(mag)) / 255.0)
+
+
+def symmetry_score(left: np.ndarray, right: Optional[np.ndarray] = None) -> float:
+    if left.size == 0:
+        return 0.0
+    if right is None:
+        mid = left.shape[1] // 2
+        left_half = left[:, :mid]
+        right_half = left[:, left.shape[1] - mid :]
+    else:
+        left_half = left
+        right_half = right
+
+    if left_half.size == 0 or right_half.size == 0:
+        return 0.0
+
+    right_half = np.fliplr(right_half)
+    min_h = min(left_half.shape[0], right_half.shape[0])
+    min_w = min(left_half.shape[1], right_half.shape[1])
+    if min_h == 0 or min_w == 0:
+        return 0.0
+
+    l = left_half[:min_h, :min_w].astype(np.float32)
+    r = right_half[:min_h, :min_w].astype(np.float32)
+    diff = np.abs(l - r)
+    return clamp01(1.0 - float(np.mean(diff)) / 255.0)
+
+
+def _triangle_angle(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
+    ba = a.astype(np.float32) - b.astype(np.float32)
+    bc = c.astype(np.float32) - b.astype(np.float32)
+    denom = float(np.linalg.norm(ba) * np.linalg.norm(bc))
+    if denom <= 1e-6:
+        return 0.0
+    cos_v = float(np.dot(ba, bc) / denom)
+    return math.degrees(math.acos(float(np.clip(cos_v, -1.0, 1.0))))
+
+
 def extract_30_features_from_aligned_face(
     face_bgr_128: np.ndarray, landmarker, orientation_angle_deg: float
-) -> Optional[np.ndarray]:
+) -> Tuple[Optional[np.ndarray], Optional[Dict]]:
     face_rgb = cv2.cvtColor(face_bgr_128, cv2.COLOR_BGR2RGB)
     eye_info = estimate_eye_centers_from_landmarker(face_rgb, landmarker)
     if eye_info is None:
-        return None
+        return None, None
     left_eye, right_eye, pts = eye_info
 
     h, w = face_bgr_128.shape[:2]
     gray = cv2.cvtColor(face_bgr_128, cv2.COLOR_BGR2GRAY)
 
-    # Approximate face bounds from key landmarks.
-    xs = [pts["left_eye"][0], pts["right_eye"][0], pts["nose"][0], pts["mouth_left"][0], pts["mouth_right"][0]]
-    ys = [pts["left_eye"][1], pts["right_eye"][1], pts["nose"][1], pts["mouth_left"][1], pts["mouth_right"][1]]
-    fx1 = max(0.0, min(xs) - 0.25 * w)
-    fx2 = min(float(w), max(xs) + 0.25 * w)
-    fy1 = max(0.0, min(ys) - 0.35 * h)
-    fy2 = min(float(h), max(ys) + 0.35 * h)
+    landmarks = np.stack(
+        [
+            pts["left_eye"],
+            pts["right_eye"],
+            pts["nose"],
+            pts["mouth_left"],
+            pts["mouth_right"],
+        ],
+        axis=0,
+    ).astype(np.float32)
+    lx1, ly1 = np.min(landmarks, axis=0)
+    lx2, ly2 = np.max(landmarks, axis=0)
+
+    fx1 = max(0.0, float(lx1) - 0.26 * w)
+    fx2 = min(float(w), float(lx2) + 0.26 * w)
+    fy1 = max(0.0, float(ly1) - 0.34 * h)
+    fy2 = min(float(h), float(ly2) + 0.34 * h)
     face_w = max(1.0, fx2 - fx1)
     face_h = max(1.0, fy2 - fy1)
     face_area = face_w * face_h
     image_area = float(w * h)
 
-    # Geometry features (12)
+    face_center_x = 0.5 * (fx1 + fx2)
+    eye_line_y = 0.5 * (float(left_eye[1]) + float(right_eye[1]))
     eye_dist = float(np.linalg.norm(left_eye - right_eye))
     left_eye_nose = float(np.linalg.norm(left_eye - pts["nose"]))
     right_eye_nose = float(np.linalg.norm(right_eye - pts["nose"]))
@@ -170,91 +280,135 @@ def extract_30_features_from_aligned_face(
     nose_mouth = float(np.linalg.norm(pts["nose"] - mouth_center))
     mouth_width = float(np.linalg.norm(pts["mouth_left"] - pts["mouth_right"]))
 
+    forehead_ratio = (eye_line_y - fy1) / face_h
+    # Lower-face to upper-face width ratio using mouth and inter-eye spans.
+    jaw_ratio = mouth_width / max(eye_dist, 1e-6)
+    chin_ratio = (fy2 - float(pts["nose"][1])) / face_h
+    eye_vertical_offset = abs(float(left_eye[1]) - float(right_eye[1])) / face_h
+    nose_horizontal_offset = abs(float(pts["nose"][0]) - face_center_x) / face_w
+    mouth_horizontal_offset = abs(float(mouth_center[0]) - face_center_x) / face_w
+    landmark_asymmetry = np.mean(
+        [
+            abs(float(left_eye[1]) - float(right_eye[1])) / face_h,
+            abs(float(pts["nose"][0]) - face_center_x) / face_w,
+            abs(float(mouth_center[0]) - face_center_x) / face_w,
+            abs(left_eye_nose - right_eye_nose) / face_h,
+        ]
+    )
+
     geom = [
         clamp01(eye_dist / face_w),
         clamp01(left_eye_nose / face_h),
         clamp01(right_eye_nose / face_h),
+        clamp01(eye_nose_mean / face_h),
         clamp01(nose_mouth / face_h),
         clamp01(mouth_width / face_w),
-        clamp01(face_w / w),
-        clamp01(face_h / h),
-        clamp01((eye_dist / face_w) if face_w > 0 else 0.0),
-        clamp01((nose_mouth / face_h) if face_h > 0 else 0.0),
-        clamp01((mouth_width / face_w) if face_w > 0 else 0.0),
-        clamp01((eye_nose_mean / face_h) if face_h > 0 else 0.0),
-        clamp01((face_h / face_w) / 2.0),  # normalize ratio to [0,1] with practical cap 2.0
+        clamp01((face_h / face_w) / 2.0),
+        clamp01(forehead_ratio),
+        clamp01(jaw_ratio / 2.0),
+        clamp01(chin_ratio),
+        clamp01(eye_vertical_offset),
+        clamp01(nose_horizontal_offset),
+        clamp01(mouth_horizontal_offset),
+        clamp01(float(landmark_asymmetry)),
     ]
 
-    # Texture / color features (10)
-    b, g, r = cv2.split(face_bgr_128)
-    mean_r = clamp01(float(np.mean(r)) / 255.0)
-    mean_g = clamp01(float(np.mean(g)) / 255.0)
-    mean_b = clamp01(float(np.mean(b)) / 255.0)
-    std_r = clamp01(float(np.std(r)) / 255.0)
-    std_g = clamp01(float(np.std(g)) / 255.0)
-    std_b = clamp01(float(np.std(b)) / 255.0)
-    mean_gray = clamp01(float(np.mean(gray)) / 255.0)
-    std_gray = clamp01(float(np.std(gray)) / 255.0)
-    bright_pct = clamp01(float(np.mean(gray > 200)))
-    dark_pct = clamp01(float(np.mean(gray < 50)))
-
-    texture = [mean_r, mean_g, mean_b, std_r, std_g, std_b, mean_gray, std_gray, bright_pct, dark_pct]
-
-    # Structure features (8)
-    edges = cv2.Canny(gray, 50, 150)
-    edge_density = clamp01(float(np.mean(edges > 0)))
-
-    # Eye and mouth local regions.
-    def safe_patch(cx: float, cy: float, pw: int, ph: int) -> np.ndarray:
-        x1 = max(0, int(cx - pw // 2))
-        y1 = max(0, int(cy - ph // 2))
-        x2 = min(w, x1 + pw)
-        y2 = min(h, y1 + ph)
-        return gray[y1:y2, x1:x2]
-
     eye_c = 0.5 * (left_eye + right_eye)
-    eye_patch = safe_patch(float(eye_c[0]), float(eye_c[1]), int(0.5 * face_w), int(0.2 * face_h))
-    mouth_patch = safe_patch(float(mouth_center[0]), float(mouth_center[1]), int(0.5 * face_w), int(0.22 * face_h))
-    eye_edges = cv2.Canny(eye_patch, 50, 150) if eye_patch.size else np.zeros((1, 1), dtype=np.uint8)
-    mouth_edges = cv2.Canny(mouth_patch, 50, 150) if mouth_patch.size else np.zeros((1, 1), dtype=np.uint8)
-    edge_eye = clamp01(float(np.mean(eye_edges > 0)))
-    edge_mouth = clamp01(float(np.mean(mouth_edges > 0)))
+    eye_patch = safe_patch(gray, eye_c, 0.62 * face_w, 0.22 * face_h)
+    nose_patch = safe_patch(gray, pts["nose"], 0.28 * face_w, 0.24 * face_h)
+    mouth_patch = safe_patch(gray, mouth_center, 0.56 * face_w, 0.22 * face_h)
+    left_cheek_c = np.array(
+        [face_center_x - 0.24 * face_w, 0.5 * (float(pts["nose"][1]) + float(mouth_center[1]))],
+        dtype=np.float32,
+    )
+    right_cheek_c = np.array(
+        [face_center_x + 0.24 * face_w, 0.5 * (float(pts["nose"][1]) + float(mouth_center[1]))],
+        dtype=np.float32,
+    )
+    forehead_c = np.array([face_center_x, fy1 + 0.5 * max(1.0, eye_line_y - fy1)], dtype=np.float32)
+    left_cheek_patch = safe_patch(gray, left_cheek_c, 0.22 * face_w, 0.22 * face_h)
+    right_cheek_patch = safe_patch(gray, right_cheek_c, 0.22 * face_w, 0.22 * face_h)
+    forehead_patch = safe_patch(gray, forehead_c, 0.38 * face_w, 0.18 * face_h)
 
-    left_half = gray[:, : w // 2]
-    right_half = gray[:, w - (w // 2) :]
-    right_flip = np.fliplr(right_half)
-    min_h = min(left_half.shape[0], right_flip.shape[0])
-    min_w = min(left_half.shape[1], right_flip.shape[1])
-    if min_h == 0 or min_w == 0:
-        symmetry = 0.0
-    else:
-        diff = np.abs(left_half[:min_h, :min_w].astype(np.float32) - right_flip[:min_h, :min_w].astype(np.float32))
-        symmetry = clamp01(1.0 - (float(np.mean(diff)) / 255.0))
+    patch_vars = np.array(
+        [
+            float(np.var(eye_patch)) / (255.0 * 255.0),
+            float(np.var(nose_patch)) / (255.0 * 255.0),
+            float(np.var(mouth_patch)) / (255.0 * 255.0),
+            float(np.var(left_cheek_patch)) / (255.0 * 255.0),
+            float(np.var(right_cheek_patch)) / (255.0 * 255.0),
+            float(np.var(forehead_patch)) / (255.0 * 255.0),
+        ],
+        dtype=np.float32,
+    )
+    # Inverse coefficient-of-variation style stability for local texture statistics.
+    patch_var_std = float(np.std(patch_vars))
+    patch_var_mean = float(np.mean(patch_vars))
+    texture_consistency = 1.0 / (1.0 + patch_var_std / (patch_var_mean + 1e-6))
+
+    texture = [
+        patch_entropy(eye_patch),
+        patch_entropy(nose_patch),
+        patch_entropy(mouth_patch),
+        clamp01(float(patch_vars[3])),
+        clamp01(float(patch_vars[4])),
+        clamp01(float(patch_vars[5])),
+        edge_density(eye_patch),
+        edge_density(mouth_patch),
+        gradient_mean(nose_patch),
+        clamp01(texture_consistency),
+    ]
+
+    face_patch = safe_patch(
+        gray,
+        (face_center_x, 0.5 * (fy1 + fy2)),
+        face_w,
+        face_h,
+    )
+    global_symmetry = symmetry_score(face_patch)
+    left_eye_patch = safe_patch(gray, left_eye, 0.24 * face_w, 0.18 * face_h)
+    right_eye_patch = safe_patch(gray, right_eye, 0.24 * face_w, 0.18 * face_h)
+    eye_symmetry = symmetry_score(left_eye_patch, right_eye_patch)
+    mouth_symmetry = symmetry_score(mouth_patch)
+
+    triangle_angles = [
+        _triangle_angle(left_eye, pts["nose"], right_eye),
+        _triangle_angle(pts["mouth_left"], pts["nose"], pts["mouth_right"]),
+        _triangle_angle(left_eye, mouth_center, right_eye),
+    ]
+    # Mean normalized landmark triangle angle summarizing facial angular configuration.
+    landmark_angular_configuration = float(np.mean(triangle_angles)) / 180.0
 
     angle_norm = clamp01((orientation_angle_deg + 45.0) / 90.0)
     face_area_ratio = clamp01(face_area / image_area)
-    bbox_aspect = clamp01((face_w / face_h) / 2.0)  # cap with 2.0
-
-    sobel_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
-    sobel_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
-    grad_mag = cv2.magnitude(sobel_x, sobel_y)
-    grad_norm = clamp01(float(np.mean(grad_mag)) / 255.0)
 
     structure = [
-        edge_density,
-        edge_eye,
-        edge_mouth,
-        symmetry,
+        global_symmetry,
+        eye_symmetry,
+        mouth_symmetry,
+        clamp01(landmark_angular_configuration),
         angle_norm,
         face_area_ratio,
-        bbox_aspect,
-        grad_norm,
     ]
 
     features = np.array(geom + texture + structure, dtype=np.float32)
-    if features.shape != (30,):
-        return None
-    return np.clip(features, 0.0, 1.0)
+    assert features.shape == (30,)
+    features = np.clip(features, 0.0, 1.0).astype(np.float32)
+
+    metadata = {
+        "face_bbox": (float(fx1), float(fy1), float(fx2), float(fy2)),
+        "face_w": float(face_w),
+        "face_h": float(face_h),
+        "eye_dist": float(eye_dist),
+        "mouth_width": float(mouth_width),
+        "nose_mouth": float(nose_mouth),
+        "symmetry": float(global_symmetry),
+        "orientation": float(orientation_angle_deg),
+        "jaw_ratio": float(jaw_ratio),
+        "texture_consistency": float(texture_consistency),
+        "landmark_angular_configuration": float(landmark_angular_configuration),
+    }
+    return features, metadata
 
 
 def align_face_and_extract(
@@ -284,7 +438,7 @@ def align_face_and_extract(
     aligned_crop = rotate_image_keep_size(face_crop, -angle)
     aligned_128 = resize_with_padding(aligned_crop, size=face_size)
 
-    features = extract_30_features_from_aligned_face(
+    features, feature_metadata = extract_30_features_from_aligned_face(
         aligned_128, landmarker, orientation_angle_deg=angle
     )
     if features is None:
@@ -295,6 +449,7 @@ def align_face_and_extract(
         "aligned_size": face_size,
         "orientation_angle_deg": float(angle),
         "face_box": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
+        "feature_debug": feature_metadata,
     }
     return features, metadata
 
@@ -387,7 +542,7 @@ def extract_single_face_features_from_bgr(
     angle = math.degrees(math.atan2(dy, dx))
     aligned_crop = rotate_image_keep_size(face_crop, -angle)
     aligned_128 = resize_with_padding(aligned_crop, size=face_size)
-    features = extract_30_features_from_aligned_face(
+    features, feature_metadata = extract_30_features_from_aligned_face(
         aligned_128, landmarker, orientation_angle_deg=angle
     )
     if features is None:
@@ -398,6 +553,7 @@ def extract_single_face_features_from_bgr(
         "aligned_size": face_size,
         "orientation_angle_deg": float(angle),
         "face_box": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
+        "feature_debug": feature_metadata,
     }
     return features, metadata, "ok", 1
 
