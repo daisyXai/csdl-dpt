@@ -23,7 +23,7 @@ except ImportError:
 
 LANDMARKER_MODEL_PATH = Path("src/models/face_landmarker.task")
 FACE_SIZE = 128
-IMAGES_DIR = Path("src/images").resolve()
+IMAGES_DIR = Path("src/images_v2_face_only").resolve()
 
 app = FastAPI(title="Face Search API")
 app.mount("/static/images", StaticFiles(directory=str(IMAGES_DIR)), name="images")
@@ -385,167 +385,47 @@ def build_preview_url(image_location: str) -> str:
     try:
         rel = loc.relative_to(IMAGES_DIR)
     except ValueError:
-        # fallback: send absolute path encoded (not expected if data is under src/images)
+        # fallback: serve by basename when image path is outside configured static directory
         return "/static/images/" + quote(loc.name)
     return "/static/images/" + quote(rel.as_posix(), safe="/")
 
 
 def build_embedding_explanation(vector_dim: int) -> dict:
-    dimensions = [
+    ranges = [
         {
-            "index": 1,
-            "represents": "Khoang cach giua hai mat so voi be rong khuon mat.",
-            "calculated_by": "eye_dist / face_w, sau do clamp ve [0, 1].",
+            "range": "1-14",
+            "name": "Geometry features",
+            "represents": "Khoang cach, ti le khuon mat, cac do lech landmark va hinh hoc mat-mui-mieng.",
         },
         {
-            "index": 2,
-            "represents": "Khoang cach mat trai den mui so voi chieu cao khuon mat.",
-            "calculated_by": "left_eye_nose / face_h, sau do clamp ve [0, 1].",
+            "range": "15-1790",
+            "name": "HOG + gradient features",
+            "represents": "Mo ta contour, huong gradient, histogram huong canh va thong ke do manh gradient.",
         },
         {
-            "index": 3,
-            "represents": "Khoang cach mat phai den mui so voi chieu cao khuon mat.",
-            "calculated_by": "right_eye_nose / face_h, sau do clamp ve [0, 1].",
+            "range": "1791-1796",
+            "name": "Texture features",
+            "represents": "Entropy Shannon, variance, local texture statistics, edge density va gradient mean.",
         },
         {
-            "index": 4,
-            "represents": "Khoang cach trung binh tu hai mat den mui so voi chieu cao khuon mat.",
-            "calculated_by": "mean(left_eye_nose, right_eye_nose) / face_h, sau do clamp ve [0, 1].",
+            "range": "1797-1808",
+            "name": "Skin color features",
+            "represents": "Mean/Std trong HSV va histogram kenh Hue da duoc normalize.",
         },
         {
-            "index": 5,
-            "represents": "Khoang cach mui den tam mieng so voi chieu cao khuon mat.",
-            "calculated_by": "nose_mouth / face_h, sau do clamp ve [0, 1].",
+            "range": "1809-1812",
+            "name": "Symmetry features",
+            "represents": "Doi xung tong the, doi xung mat, doi xung mieng va do on dinh texture hai ben.",
         },
         {
-            "index": 6,
-            "represents": "Do rong mieng so voi be rong khuon mat.",
-            "calculated_by": "mouth_width / face_w, sau do clamp ve [0, 1].",
-        },
-        {
-            "index": 7,
-            "represents": "Ti le dai/rong cua khuon mat.",
-            "calculated_by": "(face_h / face_w) / 2, sau do clamp ve [0, 1].",
-        },
-        {
-            "index": 8,
-            "represents": "Ti le vung tran, tinh tu dinh bbox den duong ngang qua hai mat.",
-            "calculated_by": "(eye_line_y - face_top) / face_h, sau do clamp ve [0, 1].",
-        },
-        {
-            "index": 9,
-            "represents": "Ti le ham/mieng so voi khoang cach hai mat.",
-            "calculated_by": "(mouth_width / eye_dist) / 2, sau do clamp ve [0, 1].",
-        },
-        {
-            "index": 10,
-            "represents": "Ti le phan duoi mat tinh tu mui den cam.",
-            "calculated_by": "(face_bottom - nose_y) / face_h, sau do clamp ve [0, 1].",
-        },
-        {
-            "index": 11,
-            "represents": "Do lech doc giua hai mat.",
-            "calculated_by": "abs(left_eye_y - right_eye_y) / face_h, sau do clamp ve [0, 1].",
-        },
-        {
-            "index": 12,
-            "represents": "Do lech ngang cua mui so voi truc giua khuon mat.",
-            "calculated_by": "abs(nose_x - face_center_x) / face_w, sau do clamp ve [0, 1].",
-        },
-        {
-            "index": 13,
-            "represents": "Do lech ngang cua mieng so voi truc giua khuon mat.",
-            "calculated_by": "abs(mouth_center_x - face_center_x) / face_w, sau do clamp ve [0, 1].",
-        },
-        {
-            "index": 14,
-            "represents": "Muc bat doi xung landmark tong hop.",
-            "calculated_by": "Trung binh cac do lech mat, mui, mieng va chenhlech khoang cach mat-mui.",
-        },
-        {
-            "index": 15,
-            "represents": "Do phuc tap texture vung mat.",
-            "calculated_by": "Entropy histogram muc xam cua patch mat, chuan hoa theo entropy toi da 8 bit.",
-        },
-        {
-            "index": 16,
-            "represents": "Do phuc tap texture vung mui.",
-            "calculated_by": "Entropy histogram muc xam cua patch mui, chuan hoa theo entropy toi da 8 bit.",
-        },
-        {
-            "index": 17,
-            "represents": "Do phuc tap texture vung mieng.",
-            "calculated_by": "Entropy histogram muc xam cua patch mieng, chuan hoa theo entropy toi da 8 bit.",
-        },
-        {
-            "index": 18,
-            "represents": "Do bien thien sang/toi tai ma trai.",
-            "calculated_by": "Variance muc xam patch ma trai / 255^2, sau do clamp ve [0, 1].",
-        },
-        {
-            "index": 19,
-            "represents": "Do bien thien sang/toi tai ma phai.",
-            "calculated_by": "Variance muc xam patch ma phai / 255^2, sau do clamp ve [0, 1].",
-        },
-        {
-            "index": 20,
-            "represents": "Do bien thien sang/toi tai vung tran.",
-            "calculated_by": "Variance muc xam patch tran / 255^2, sau do clamp ve [0, 1].",
-        },
-        {
-            "index": 21,
-            "represents": "Mat do canh tai vung mat.",
-            "calculated_by": "Ti le pixel edge trong patch mat bang Canny edge detector.",
-        },
-        {
-            "index": 22,
-            "represents": "Mat do canh tai vung mieng.",
-            "calculated_by": "Ti le pixel edge trong patch mieng bang Canny edge detector.",
-        },
-        {
-            "index": 23,
-            "represents": "Do manh bien/cuong do gradient tai vung mui.",
-            "calculated_by": "Mean Sobel gradient magnitude cua patch mui / 255, sau do clamp ve [0, 1].",
-        },
-        {
-            "index": 24,
-            "represents": "Do on dinh texture giua cac vung cuc bo.",
-            "calculated_by": "1 / (1 + std(patch_variances) / mean(patch_variances)).",
-        },
-        {
-            "index": 25,
-            "represents": "Do doi xung tong the cua khuon mat.",
-            "calculated_by": "So sanh nua trai voi nua phai lat guong cua patch mat: 1 - mean(abs(diff)) / 255.",
-        },
-        {
-            "index": 26,
-            "represents": "Do doi xung giua hai vung mat.",
-            "calculated_by": "So sanh patch mat trai voi patch mat phai lat guong: 1 - mean(abs(diff)) / 255.",
-        },
-        {
-            "index": 27,
-            "represents": "Do doi xung cua vung mieng.",
-            "calculated_by": "So sanh hai nua patch mieng: 1 - mean(abs(diff)) / 255.",
-        },
-        {
-            "index": 28,
-            "represents": "Cau hinh goc cua cac landmark mat-mui-mieng.",
-            "calculated_by": "Trung binh cac goc tam giac landmark, chia cho 180 va clamp ve [0, 1].",
-        },
-        {
-            "index": 29,
-            "represents": "Goc nghieng/roll cua khuon mat sau khi uoc luong theo hai mat.",
-            "calculated_by": "(orientation_angle_deg + 45) / 90, sau do clamp ve [0, 1].",
-        },
-        {
-            "index": 30,
-            "represents": "Ti le dien tich khuon mat trong anh aligned.",
-            "calculated_by": "(face_w * face_h) / image_area, sau do clamp ve [0, 1].",
+            "range": "1813-1814",
+            "name": "Pose/area features",
+            "represents": "Goc nghieng khuon mat (roll) va ti le dien tich khuon mat trong anh aligned.",
         },
     ]
     return {
-        "note": "vector nay la embedding khuon mat duoc tao tu pipeline feature hien tai",
-        "dimensions": dimensions,
+        "note": "vector nay la embedding khuon mat theo pipeline feature da refactor (geometry + HOG/gradient + texture + color + symmetry)",
+        "dimension_groups": ranges,
         "actual_dimension_count": vector_dim,
     }
 

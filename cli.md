@@ -6,3 +6,5 @@ uvicorn src.app:app --reload
 
 source .venv_mp/bin/activate
 python src/extract_feature.py
+
+python src/pre_processing/face_only.py ## crop image ra chi con face
