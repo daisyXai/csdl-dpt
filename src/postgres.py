@@ -37,6 +37,38 @@ def create_database_if_missing() -> None:
         conn.close()
 
 
+def _create_images_indexes(cur) -> None:
+    """
+    Build secondary indexes for `images`.
+
+    - B-tree on image_name: exact / prefix lookups by file name.
+    - HNSW on vector with cosine ops: approximate nearest neighbor for
+      similarity search in SQL (ORDER BY vector <=> query), aligned with
+      cosine distance used in application code.
+    """
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_images_image_name
+        ON images (image_name);
+        """
+    )
+    try:
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_images_vector_hnsw_cosine
+            ON images USING hnsw (vector vector_cosine_ops);
+            """
+        )
+    except psycopg2.Error as exc:
+        print(
+            "[WARN] HNSW index on vector failed (need pgvector with HNSW support). "
+            f"Error: {exc}\n"
+            "       Fallback (IVFFlat, train after bulk load):\n"
+            "       CREATE INDEX idx_images_vector_ivfflat_cosine ON images "
+            "       USING ivfflat (vector vector_cosine_ops) WITH (lists = 100);"
+        )
+
+
 def create_schema() -> None:
     conn = psycopg2.connect(
         host=DB_HOST,
@@ -56,12 +88,14 @@ def create_schema() -> None:
                     id BIGSERIAL PRIMARY KEY,
                     image_name VARCHAR(255) NOT NULL,
                     image_metadata JSONB,
-                    vector VECTOR,
-                    image_location TEXT NOT NULL
+                    vector vector(52),
+                    image_location TEXT NOT NULL,
+                    original_image_location TEXT
                 );
                 """
             )
-            print("[OK] Extension and table created/verified in csdl_dpt.")
+            _create_images_indexes(cur)
+            print("[OK] Extension, table, and indexes created/verified in csdl_dpt.")
     finally:
         conn.close()
 

@@ -485,6 +485,29 @@ def _extract_symmetry_statistics_features(
     ]
 
 
+# Kích thước vector ghép (thứ tự phải trùng extract_face_features_from_aligned_face).
+FEATURE_VECTOR_DIM = 52
+FEATURE_GROUP_SPECS: Tuple[Tuple[str, int], ...] = (
+    ("geometry", 14),
+    ("texture", 10),
+    ("color", 12),
+    ("structural", 10),
+    ("symmetry", 6),
+)
+
+
+def feature_group_slice_bounds() -> List[Tuple[str, int, int]]:
+    """Trả về (tên_nhóm, start, end) với end kiểu slice Python [start:end)."""
+    out: List[Tuple[str, int, int]] = []
+    offset = 0
+    for key, n in FEATURE_GROUP_SPECS:
+        out.append((key, offset, offset + n))
+        offset += n
+    if offset != FEATURE_VECTOR_DIM:
+        raise ValueError(f"FEATURE_GROUP_SPECS sum is {offset}, expected {FEATURE_VECTOR_DIM}")
+    return out
+
+
 def extract_face_features_from_aligned_face(
     face_bgr_128: np.ndarray, landmarker, orientation_angle_deg: float
 ) -> Tuple[Optional[np.ndarray], Optional[Dict]]:
